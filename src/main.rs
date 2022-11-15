@@ -1,49 +1,155 @@
+mod camera;
+mod hittable;
+mod hittable_list;
+mod material;
 mod ray;
-mod vec;
-use ray::Ray;
-use std::io::{stderr, Write};
-use vec::Vec3;
+mod sphere;
+mod vec3;
 
-fn ray_color(ray: &Ray) -> Vec3 {
-    let unit_direction = ray.direction().unit_vector();
-    let t = 0.5 * (unit_direction.y() + 1.0);
-    (1.0 - t) * Vec3::new(1.0, 1.0, 1.0) + t * Vec3::new(0.5, 0.7, 1.0)
+use camera::Camera;
+use hittable::Hittable;
+use hittable_list::HittableList;
+use material::{scatter, Material};
+use ray::Ray;
+use sphere::Sphere;
+use vec3::Vec3;
+
+use rand::prelude::*;
+
+fn color(r: &Ray, world: &HittableList, depth: i32) -> Vec3 {
+    if let Some(rec) = world.hit(&r, 0.001, std::f32::MAX) {
+        let mut scattered = Ray::ray(Vec3::default(), Vec3::default());
+        let mut attentuation = Vec3::default();
+
+        if depth < 50 && scatter(&rec.material, r, &rec, &mut attentuation, &mut scattered) {
+            return attentuation * color(&scattered, world, depth + 1);
+        } else {
+            return Vec3::new(0.0, 0.0, 0.0);
+        }
+    } else {
+        let unit_direction = Vec3::unit_vector(&r.direction());
+        let t = 0.5 * (unit_direction.y() + 1.0);
+
+        Vec3::new(1.0, 1.0, 1.0) * (1.0 - t) + Vec3::new(0.5, 0.7, 1.0) * t
+    }
 }
 
 fn main() {
-    // image
-    const ASPECT_RATIO: f64 = 16.0 / 9.0;
-    const IMAGE_WIDTH: u64 = 400;
-    const IMAGE_HEIGHT: u64 = (IMAGE_WIDTH as f64 / ASPECT_RATIO) as u64;
+    let width = 1600;
+    let height = 800;
+    let samples = 100; 
+    let max_value = 255;
 
-    // camera
-    let viewport_height = 2.0;
-    let viewport_width = ASPECT_RATIO * viewport_height;
-    let focal_length = 1.0;
+    let mut list: Vec<Box<dyn Hittable>> = Vec::new();
 
-    let origin = Vec3::new(0.0, 0.0, 0.0);
-    let horizontal = Vec3::new(viewport_width, 0.0, 0.0);
-    let vertical = Vec3::new(0.0, viewport_height, 0.0);
-    let lower_left_corner =
-        origin - horizontal / 2.0 - vertical / 2.0 - Vec3::new(0.0, 0.0, focal_length);
+    list.push(Box::new(Sphere::sphere(
+        Vec3::new(0.0, -1000.0, 0.0),
+        1000.0,
+        Material::Lambertian {
+            albedo: Vec3::new(0.5, 0.5, 0.5),
+        },
+    )));
 
-    // render
-    println!("P3");
-    println!("{} {}", IMAGE_WIDTH, IMAGE_HEIGHT);
-    println!("255");
-
-    for i in (0..IMAGE_HEIGHT).rev() {
-        eprint!("\rScanlines remaining: {}\n", i);
-        stderr().flush().unwrap();
-        for j in 0..IMAGE_WIDTH {
-            let u = j as f64 / (IMAGE_WIDTH - 1) as f64;
-            let v = i as f64 / (IMAGE_HEIGHT - 1) as f64;
-            let r = Ray::new(
-                origin,
-                lower_left_corner + u * horizontal + v * vertical - origin,
+    let mut rng = rand::thread_rng();
+    for a in -11..11 {
+        for b in -11..11 {
+            let choose_mat = rng.gen::<f32>();
+            let centre = Vec3::new(
+                a as f32 + 0.9 * rng.gen::<f32>(),
+                0.2,
+                b as f32 + 0.9 * rng.gen::<f32>(),
             );
-            let pixel_color = ray_color(&r);
-            pixel_color.write_color();
+
+            if (centre - Vec3::new(4.0, 0.2, 0.0)).length() > 0.9 {
+                if choose_mat < 0.8 {
+                    let albedo = Vec3::random() * Vec3::random();
+                    list.push(Box::new(Sphere::sphere(
+                        centre,
+                        0.2,
+                        Material::Lambertian { albedo },
+                    )));
+                } else if choose_mat < 0.95 {
+                    let albedo = Vec3::random_init(0.5, 1.0);
+                    let fuzz = rng.gen_range(0.0, 0.5);
+                    list.push(Box::new(Sphere::sphere(
+                        centre,
+                        0.2,
+                        Material::Metal { albedo, fuzz },
+                    )));
+                } else {
+                    list.push(Box::new(Sphere::sphere(
+                        centre,
+                        0.2,
+                        Material::Dielectric { ref_idx: 1.5 },
+                    )));
+                }
+            }
+        }
+    }
+    list.push(Box::new(Sphere::sphere(
+        Vec3::new(0.0, 1.0, 0.0),
+        1.0,
+        Material::Dielectric { ref_idx: 1.5 },
+    )));
+    list.push(Box::new(Sphere::sphere(
+        Vec3::new(-4.0, 1.0, 0.0),
+        1.0,
+        Material::Lambertian {
+            albedo: Vec3::new(0.4, 0.2, 0.1),
+        },
+    )));
+    list.push(Box::new(Sphere::sphere(
+        Vec3::new(4.0, 1.0, 0.0),
+        1.0,
+        Material::Metal {
+            albedo: Vec3::new(0.7, 0.6, 0.5),
+            fuzz: 0.0,
+        },
+    )));
+
+    let world = HittableList::new(list);
+
+    let aspect_ratio = width as f32 / height as f32;
+    let look_from = Vec3::new(13.0, 2.0, 3.0);
+    let look_at = Vec3::new(0.0, 0.0, 0.0);
+    let vup = Vec3::new(0.0, 1.0, 0.0);
+
+    let dist_to_focus = 10.0;
+    let apeture = 0.1;
+
+    let cam = Camera::camera(
+        look_from,
+        look_at,
+        vup,
+        20.0,
+        aspect_ratio,
+        apeture,
+        dist_to_focus,
+    );
+
+    println!("P3\n{} {}\n{}", width, height, max_value);
+
+    for j in (0..height).rev() {
+        for i in 0..width {
+            let mut col = Vec3::default();
+
+            for _ in 0..samples {
+                let u = (i as f32 + rng.gen::<f32>()) / width as f32;
+                let v = (j as f32 + rng.gen::<f32>()) / height as f32;
+
+                let r = &cam.get_ray(u, v);
+                col = col + color(&r, &world, 0);
+            }
+
+            col = col / samples as f32;
+            col = Vec3::new(col.r().sqrt(), col.g().sqrt(), col.b().sqrt());
+
+            let ir = (255.99 * col.r()) as i32;
+            let ig = (255.99 * col.g()) as i32;
+            let ib = (255.99 * col.b()) as i32;
+
+            println!("{} {} {}", ir, ig, ib);
         }
     }
 }
+
